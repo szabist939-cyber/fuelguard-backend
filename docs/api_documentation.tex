@@ -2,6 +2,7 @@
 
 % ── Packages ──────────────────────────────────────────────────────────────────
 \usepackage[a4paper, margin=2.2cm]{geometry}
+\usepackage[utf8]{inputenc}
 \usepackage{xcolor}
 \usepackage{tcolorbox}
 \usepackage{tabularx}
@@ -9,7 +10,6 @@
 \usepackage{array}
 \usepackage{longtable}
 \usepackage{enumitem}
-\usepackage{titlesec}
 \usepackage{fancyhdr}
 \usepackage{hyperref}
 \usepackage{fontawesome5}
@@ -17,8 +17,6 @@
 \usepackage{microtype}
 \usepackage{lmodern}
 \usepackage[T1]{fontenc}
-\usepackage{listings}
-\usepackage{mdframed}
 
 \tcbuselibrary{skins, breakable}
 
@@ -40,34 +38,31 @@
 \definecolor{sectionline}{HTML}{2563EB}
 
 % ── Page style ────────────────────────────────────────────────────────────────
+\setlength{\headheight}{24pt}
+\addtolength{\topmargin}{-12pt}
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\color{navydark}\textbf{FuelGuard API} \textcolor{bordergray}{|} REST Reference}
-\fancyhead[R]{\small\color{textgray}v1 · /api/v1}
+\fancyhead[R]{\small\color{textgray}v1 $\cdot$ /api/v1}
 \fancyfoot[C]{\small\color{textgray}\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{\hbox to\headwidth{\color{bordergray}\leaders\hrule height \headrulewidth\hfill}}
 
-% ── Section styling ───────────────────────────────────────────────────────────
-\titleformat{\section}[block]
-  {\Large\bfseries\color{navydark}}
-  {}
-  {0pt}
-  {\colorbox{navydark}{\parbox{\dimexpr\textwidth-2\fboxsep}{\color{white}\hspace{4pt}#1\hspace{4pt}}}\vspace{2pt}}
+% ── Section styling (pure LaTeX kernel — no titlesec) ────────────────────────
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-3.5ex \@plus -1ex \@minus -.2ex}%
+  {2.3ex \@plus .2ex}%
+  {\normalfont\Large\bfseries\color{navydark}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-3.25ex \@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries\color{navydark}}}
+\makeatother
 
-\titleformat{\subsection}[block]
-  {\normalsize\bfseries\color{navydark}}
-  {}
-  {0pt}
-  {#1}
-\titlespacing{\subsection}{0pt}{10pt}{4pt}
-
-% ── HTTP method badges ────────────────────────────────────────────────────────
+% ── HTTP method badges (plain colorbox — safe inside any tcolorbox title) ────
 \newcommand{\methodbadge}[2]{%
-  \tcbox[on line, arc=3pt, outer arc=3pt,
-    colback=#1, colframe=#1, colupper=white,
-    boxsep=1pt, left=4pt, right=4pt, top=2pt, bottom=2pt,
-    fontupper=\bfseries\small\sffamily]{#2}%
+  {\setlength{\fboxsep}{3pt}\colorbox{#1}{\textcolor{white}{\bfseries\small\sffamily#2}}}%
 }
 \newcommand{\GET}{\methodbadge{getblue}{GET}}
 \newcommand{\POST}{\methodbadge{postgreen}{POST}}
@@ -75,25 +70,26 @@
 \newcommand{\DELETE}{\methodbadge{deletered}{DELETE}}
 \newcommand{\PATCH}{\methodbadge{patchpurple}{PATCH}}
 
-% ── Auth badge ────────────────────────────────────────────────────────────────
-\newcommand{\authrequired}{\tcbox[on line, arc=3pt,
-  colback=tagbg, colframe=tagfg, colupper=tagfg,
-  boxsep=1pt, left=3pt, right=3pt, top=1pt, bottom=1pt,
-  fontupper=\tiny\bfseries\sffamily]{🔒 AUTH}}
-
-\newcommand{\adminonly}{\tcbox[on line, arc=3pt,
-  colback=reqbg, colframe=putorange, colupper=putorange,
-  boxsep=1pt, left=3pt, right=3pt, top=1pt, bottom=1pt,
-  fontupper=\tiny\bfseries\sffamily]{ADMIN}}
-
-\newcommand{\noauth}{\tcbox[on line, arc=3pt,
-  colback=resbg, colframe=postgreen, colupper=postgreen,
-  boxsep=1pt, left=3pt, right=3pt, top=1pt, bottom=1pt,
-  fontupper=\tiny\bfseries\sffamily]{PUBLIC}}
+% ── Auth badges ───────────────────────────────────────────────────────────────
+\newcommand{\authrequired}{%
+  {\setlength{\fboxsep}{2pt}\colorbox{tagbg}{\textcolor{tagfg}{\tiny\bfseries\sffamily\faLock~AUTH}}}%
+}
+\newcommand{\adminonly}{%
+  {\setlength{\fboxsep}{2pt}\colorbox{reqbg}{\textcolor{putorange}{\tiny\bfseries\sffamily ADMIN}}}%
+}
+\newcommand{\noauth}{%
+  {\setlength{\fboxsep}{2pt}\colorbox{resbg}{\textcolor{postgreen}{\tiny\bfseries\sffamily PUBLIC}}}%
+}
 
 % ── Endpoint box ──────────────────────────────────────────────────────────────
-\newenvironment{endpoint}[4]{%
-  % #1=method cmd  #2=path  #3=auth badge  #4=description
+% Use \@ifundefined so this compiles whether or not `endpoint` is pre-defined
+% (Overleaf templates may pre-define it; local TeX installs do not).
+\makeatletter
+\@ifundefined{endpoint}{%
+  \newenvironment{endpoint}[4]}{%
+  \renewenvironment{endpoint}[4]}%
+{%
+  % #1=method badge  #2=path  #3=auth badge  #4=description
   \begin{tcolorbox}[
     breakable,
     colback=bglight,
@@ -101,26 +97,21 @@
     arc=4pt,
     left=8pt, right=8pt, top=6pt, bottom=6pt,
     before skip=8pt, after skip=4pt,
-    title={\raisebox{-1pt}{#1}\hspace{6pt}\texttt{\textbf{#2}}\hspace{8pt}#3},
+    title={#1\hspace{6pt}\texttt{\textbf{#2}}\hspace{8pt}#3},
     attach boxed title to top left={yshift=-2mm, xshift=4mm},
     boxed title style={colback=white, colframe=white},
     fonttitle=\normalsize
   ]
-  \textcolor{textgray}{\small #4}\\[4pt]
-}{%
-  \end{tcolorbox}
-}
+  \textcolor{textgray}{\small #4}\par\smallskip
+}{\end{tcolorbox}}
+\makeatother
 
 % ── Request / Response tables ─────────────────────────────────────────────────
-\newcommand{\reqheader}{\vspace{2pt}\textbf{\small\color{putorange}Request}}
-\newcommand{\resheader}{\vspace{2pt}\textbf{\small\color{postgreen}Response}}
-
-\newcolumntype{F}{>{\ttfamily\small}l}
-\newcolumntype{T}{>{\small}l}
-\newcolumntype{D}{>{\small\raggedright\arraybackslash}X}
+\newcommand{\reqheader}{\vspace{2pt}\noindent\textbf{\small\color{putorange}Request}}
+\newcommand{\resheader}{\vspace{2pt}\noindent\textbf{\small\color{postgreen}Response}}
 
 \newcommand{\paramtable}[1]{%
-  \begin{tabularx}{\linewidth}{F T D}
+  \begin{tabularx}{\linewidth}{>{\ttfamily\small}l >{\small}l >{\small\raggedright\arraybackslash}X}
   \toprule
   \normalfont\textbf{\small Field} & \normalfont\textbf{\small Type} & \normalfont\textbf{\small Notes} \\
   \midrule
@@ -153,7 +144,7 @@
   \vspace{0.5cm}
 
   {\large\color{textgray}
-    Backend: FastAPI · Python 3.11\\
+    Backend: FastAPI $\cdot$ Python 3.11\\
     Database: Cloud Firestore (Firebase)\\
     Storage: Cloudinary\\
     AI: Groq (llama-3.3-70b-versatile)
@@ -192,7 +183,7 @@
   \end{tabular}
 
   \vfill
-  {\small\color{textgray}SR Development Team · FuelGuard FYP · 2025}
+  {\small\color{textgray}SR Development Team $\cdot$ FuelGuard FYP $\cdot$ 2025}
 \end{titlepage}
 
 \tableofcontents
@@ -599,7 +590,7 @@
   Returns the authenticated user's own transaction history, paginated.
   Includes completed, pending and failed records.
 }
-  \reqheader\quad\textit{Query params:} \texttt{limit} (max 100, default 20), \texttt{offset}\\[4pt]
+  \reqheader\quad\textit{Query params:} \texttt{limit} (max 500, default 20), \texttt{offset}\\[4pt]
   \resheader
   \paramtable{
     total & int   & Total transactions for this user \\
@@ -805,7 +796,7 @@
   Updates the current fuel price at a station. The previous price is
   archived in the price history collection for trend analysis.
 }
-  \reqheader\quad\textit{Path param:} \texttt{station\_id} · \textit{Query params:} \texttt{fuel\_type}, \texttt{price\_per\_litre}\\[4pt]
+  \reqheader\quad\textit{Path param:} \texttt{station\_id} $\cdot$ \textit{Query params:} \texttt{fuel\_type}, \texttt{price\_per\_litre}\\[4pt]
   \resheader
   \paramtable{
     message          & string & Confirmation \\
@@ -818,7 +809,7 @@
   Returns the historical price records for a station, optionally filtered
   by fuel type. Useful for trend charts.
 }
-  \reqheader\quad\textit{Path param:} \texttt{station\_id} · \textit{Query param:} \texttt{fuel\_type?}\\[4pt]
+  \reqheader\quad\textit{Path param:} \texttt{station\_id} $\cdot$ \textit{Query param:} \texttt{fuel\_type?}\\[4pt]
   \resheader\quad\textit{Array of price history objects ordered by date}
 \end{endpoint}
 
@@ -937,7 +928,7 @@
   the evidence collection. A thumbnail URL is generated automatically via
   Cloudinary transformations. Evidence is auto-deleted after the retention period (90 days).
 }
-  \reqheader\quad\textit{Query params:} \texttt{transaction\_id}, \texttt{nozzle\_id}, \texttt{session\_id?}, \texttt{capture\_trigger} (default \texttt{"auto"}) · Body: \texttt{file} (multipart image)\\[4pt]
+  \reqheader\quad\textit{Query params:} \texttt{transaction\_id}, \texttt{nozzle\_id}, \texttt{session\_id?}, \texttt{capture\_trigger} (default \texttt{"auto"}) $\cdot$ Body: \texttt{file} (multipart image)\\[4pt]
   \resheader
   \paramtable{
     id              & string   & Evidence ID \\
@@ -1245,7 +1236,7 @@
   Uploads a firmware binary file to Cloudinary (\texttt{resource\_type: raw}) and creates
   a firmware release record. Devices pull this URL during OTA updates.
 }
-  \reqheader\quad\textit{Query params:} \texttt{version}, \texttt{release\_notes?}, \texttt{is\_mandatory} (default false) · Body: \texttt{file} (binary .bin)\\[4pt]
+  \reqheader\quad\textit{Query params:} \texttt{version}, \texttt{release\_notes?}, \texttt{is\_mandatory} (default false) $\cdot$ Body: \texttt{file} (binary .bin)\\[4pt]
   \resheader
   \paramtable{
     id            & string & Firmware record ID \\
@@ -1361,7 +1352,7 @@
 
 \begin{endpoint}{\PATCH}{/admin/complaints/\{complaint\_id\}}{\adminonly}{
   Updates a complaint's status and optionally adds a resolution note.
-  Status transitions: \texttt{open → in\_progress → resolved | closed}.
+  Status transitions: \texttt{open} $\to$ \texttt{in\_progress} $\to$ \texttt{resolved | closed}.
 }
   \reqheader\quad\textit{Query params:} \texttt{status}, \texttt{resolution\_note?}\\[4pt]
   \resheader

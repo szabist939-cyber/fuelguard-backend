@@ -177,6 +177,54 @@ async def update_complaint_status(
     return {"message": "Complaint updated"}
 
 
+@router.get("/complaint-stats")
+async def complaint_stats(_: dict = Depends(require_admin)):
+    db    = get_db()
+    docs  = db.collection(Collections.COMPLAINTS).get()
+    stats: dict[str, int] = {"total": 0, "open": 0, "in_progress": 0, "resolved": 0, "closed": 0}
+    for d in docs:
+        s = d.to_dict().get("status", "open")
+        stats["total"] += 1
+        if s in stats:
+            stats[s] += 1
+    return stats
+
+
+@router.get("/nozzle-monitoring")
+async def nozzle_monitoring(
+    nozzle_status: str | None = Query(None, alias="status"),
+    station_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    _: dict = Depends(require_admin),
+):
+    db    = get_db()
+    query = db.collection(Collections.NOZZLES)
+    if nozzle_status:
+        query = query.where("status", "==", nozzle_status)
+    if station_id:
+        query = query.where("station_id", "==", station_id)
+    docs = query.limit(limit).get()
+
+    nozzles = []
+    for d in docs:
+        data = {"id": d.id, **d.to_dict()}
+        # Attach today's transaction count for each nozzle
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        tx_docs = (
+            db.collection(Collections.TRANSACTIONS)
+            .where("nozzle_id", "==", d.id)
+            .where("created_at", ">=", today_start)
+            .get()
+        )
+        tx_list = [t.to_dict() for t in tx_docs]
+        data["transactions_today"]    = len(tx_list)
+        data["litres_today"]          = round(sum(t.get("litres_dispensed", 0) for t in tx_list), 2)
+        data["revenue_today_pkr"]     = round(sum(t.get("total_amount", 0) for t in tx_list), 2)
+        nozzles.append(data)
+
+    return {"total": len(nozzles), "items": nozzles}
+
+
 @router.get("/analytics")
 async def business_analytics(_: dict = Depends(require_admin)):
     db          = get_db()

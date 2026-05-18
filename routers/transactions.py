@@ -78,7 +78,7 @@ async def create_transaction(
 
 @router.get("/my")
 async def my_transactions(
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=500),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
 ):

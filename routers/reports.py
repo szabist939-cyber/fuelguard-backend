@@ -90,6 +90,17 @@ async def employee_report(period: str = Query("monthly")):
         perf[emp_id]["transaction_count"] += 1
         perf[emp_id]["total_revenue"]     += tx.get("total_amount", 0.0)
         perf[emp_id]["total_litres"]      += tx.get("litres_dispensed", 0.0)
+
+    # Enrich with employee profile data
+    emp_ids = list(perf.keys())
+    for emp_id in emp_ids:
+        emp_doc = db.collection(Collections.USERS).document(emp_id).get()
+        if emp_doc.exists:
+            emp_data = emp_doc.to_dict()
+            perf[emp_id]["full_name"] = emp_data.get("full_name")
+            perf[emp_id]["email"]     = emp_data.get("email")
+            perf[emp_id]["phone"]     = emp_data.get("phone")
+
     return {"period": period, "employees": perf}
 
 

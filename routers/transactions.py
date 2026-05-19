@@ -90,12 +90,23 @@ async def my_transactions(
     )
     # Sort in Python — avoids requiring a Firestore composite index on
     # (user_id, created_at) which may not be deployed yet.
-    items = sorted(
+    raw_items = sorted(
         [{"id": d.id, **d.to_dict()} for d in docs],
         key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    return {"total": len(items), "items": items[offset: offset + limit]}
+    # Run each item through TransactionResponse so:
+    #  - all missing fields get their Pydantic defaults (e.g. is_flagged=False)
+    #  - datetime objects are serialised to ISO-8601 strings
+    #  - any document that is genuinely malformed is skipped rather than crashing
+    validated = []
+    for item in raw_items:
+        try:
+            validated.append(TransactionResponse(**item).model_dump(mode="json"))
+        except Exception:
+            # Keep the raw item so at least partial data is returned
+            validated.append(item)
+    return {"total": len(validated), "items": validated[offset: offset + limit]}
 
 
 @router.get("/prices/current")

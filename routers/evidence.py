@@ -36,9 +36,9 @@ def _init_cloudinary() -> bool:
 @router.post("", response_model=EvidenceResponse, status_code=status.HTTP_201_CREATED)
 async def upload_evidence(
     transaction_id: str,
-    nozzle_id: str,
+    nozzle_id: str = "manual",
     session_id: str | None = None,
-    capture_trigger: str = "auto",
+    capture_trigger: str = "manual",
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from core.dependencies import require_admin
+from core.dependencies import get_current_user, require_admin
 from core.firebase import Collections, get_db
 from services.report_service import (
     build_sales_report,
@@ -279,3 +279,170 @@ async def chart_fraud(period: str = Query("monthly")):
         by_type[t]     = by_type.get(t, 0) + 1
         by_severity[s] = by_severity.get(s, 0) + 1
     return {"period": period, "by_type": by_type, "by_severity": by_severity}
+
+
+# ── User-level reporting (any authenticated user) ─────────────────────────────
+
+@router.get("/my-summary")
+async def my_report_summary(
+    period: str = Query("monthly", enum=["daily", "weekly", "monthly", "all"]),
+    current_user: dict = Depends(get_current_user),
+):
+    """Aggregated stats for the current user's own transactions."""
+    db = get_db()
+    query = db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"])
+
+    if period != "all":
+        start, end = _date_range(period)
+        query = query.where("created_at", ">=", start).where("created_at", "<=", end)
+
+    items = [{"id": d.id, **d.to_dict()} for d in query.get()]
+
+    total_spent  = sum(x.get("total_amount", 0) for x in items)
+    total_litres = sum(x.get("litres_dispensed", 0) for x in items)
+    count        = len(items)
+
+    fuel_breakdown:    dict[str, dict]  = {}
+    payment_breakdown: dict[str, int]   = {}
+    daily_spending:    dict[str, float] = {}
+
+    for item in items:
+        ft = item.get("fuel_type", "unknown")
+        pm = item.get("payment_method", "cash")
+
+        fuel_breakdown.setdefault(ft, {"amount": 0.0, "litres": 0.0, "count": 0})
+        fuel_breakdown[ft]["amount"] += item.get("total_amount", 0)
+        fuel_breakdown[ft]["litres"] += item.get("litres_dispensed", 0)
+        fuel_breakdown[ft]["count"]  += 1
+
+        payment_breakdown[pm] = payment_breakdown.get(pm, 0) + 1
+
+        created = item.get("created_at")
+        if created:
+            day = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)[:10]
+            daily_spending[day] = daily_spending.get(day, 0) + item.get("total_amount", 0)
+
+    return {
+        "period":              period,
+        "total_spent":         round(total_spent, 2),
+        "total_litres":        round(total_litres, 2),
+        "transaction_count":   count,
+        "avg_per_transaction": round(total_spent / count, 2) if count > 0 else 0.0,
+        "fuel_breakdown":      fuel_breakdown,
+        "payment_breakdown":   payment_breakdown,
+        "daily_spending":      [
+            {"date": k, "amount": round(v, 2)}
+            for k, v in sorted(daily_spending.items())
+        ],
+    }
+
+
+@router.get("/my-comparative")
+async def my_comparative(
+    period: str = Query("monthly", enum=["daily", "weekly", "monthly"]),
+    current_user: dict = Depends(get_current_user),
+):
+    """Current-period vs previous-period comparison for the current user."""
+    db = get_db()
+    curr_start, curr_end = _date_range(period)
+
+    if period == "monthly":
+        prev_end   = curr_start
+        prev_start = (prev_end.replace(day=1) - timedelta(days=1)).replace(day=1)
+    else:
+        delta      = curr_end - curr_start
+        prev_end   = curr_start
+        prev_start = prev_end - delta
+
+    def _agg(start: datetime, end: datetime) -> dict:
+        docs  = (
+            db.collection(Collections.TRANSACTIONS)
+            .where("user_id", "==", current_user["uid"])
+            .where("created_at", ">=", start)
+            .where("created_at", "<=", end)
+            .get()
+        )
+        txns = [d.to_dict() for d in docs]
+        return {
+            "total_spent":  round(sum(x.get("total_amount", 0) for x in txns), 2),
+            "total_litres": round(sum(x.get("litres_dispensed", 0) for x in txns), 2),
+            "count":        len(txns),
+        }
+
+    def _pct(curr: float, prev: float) -> float:
+        if prev == 0:
+            return 0.0
+        return round((curr - prev) / prev * 100, 1)
+
+    current  = _agg(curr_start, curr_end)
+    previous = _agg(prev_start, prev_end)
+
+    return {
+        "period":   period,
+        "current":  current,
+        "previous": previous,
+        "change_pct": {
+            "spent":  _pct(current["total_spent"],  previous["total_spent"]),
+            "litres": _pct(current["total_litres"], previous["total_litres"]),
+            "count":  _pct(float(current["count"]), float(previous["count"])),
+        },
+    }
+
+
+@router.post("/my-export")
+async def my_export(
+    fmt:    str = Query("pdf", alias="format", enum=["pdf", "csv"]),
+    period: str = Query("monthly", enum=["daily", "weekly", "monthly", "all"]),
+    current_user: dict = Depends(get_current_user),
+):
+    """Export the current user's transactions as PDF or CSV."""
+    db = get_db()
+    query = db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"])
+
+    if period != "all":
+        start, end = _date_range(period)
+        query = query.where("created_at", ">=", start).where("created_at", "<=", end)
+
+    raw_items = sorted(
+        [{"id": d.id, **d.to_dict()} for d in query.get()],
+        key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+    # Sanitize: convert datetime objects to strings for serialisation
+    clean_items = []
+    for item in raw_items:
+        clean = {
+            "Date":             item.get("created_at").strftime("%Y-%m-%d %H:%M UTC")
+                                if hasattr(item.get("created_at"), "strftime")
+                                else str(item.get("created_at", ""))[:16],
+            "Fuel Type":        item.get("fuel_type", "").title(),
+            "Litres":           round(item.get("litres_dispensed", 0), 2),
+            "Price/L (PKR)":    round(item.get("price_per_litre", 0), 2),
+            "Total (PKR)":      round(item.get("total_amount", 0), 2),
+            "Payment":          item.get("payment_method", "").replace("_", " ").title(),
+            "Status":           item.get("status", "").title(),
+            "Transaction ID":   item.get("id", "")[-12:],
+        }
+        clean_items.append(clean)
+
+    data = {
+        "items":              clean_items,
+        "total_transactions": len(clean_items),
+        "period":             period,
+    }
+
+    if fmt == "pdf":
+        content    = export_report_to_pdf(data, "My Transactions")
+        media_type = "application/pdf"
+        filename   = f"my_transactions_{period}.pdf"
+    else:
+        content    = export_report_to_csv(data, "my_transactions")
+        media_type = "text/csv"
+        filename   = f"my_transactions_{period}.csv"
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )

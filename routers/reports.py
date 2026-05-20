@@ -283,6 +283,23 @@ async def chart_fraud(period: str = Query("monthly")):
 
 # ── User-level reporting (any authenticated user) ─────────────────────────────
 
+def _filter_by_period(items: list[dict], period: str) -> list[dict]:
+    """Filter items by period using Python (avoids composite Firestore index)."""
+    if period == "all":
+        return items
+    start, end = _date_range(period)
+    result = []
+    for x in items:
+        created = x.get("created_at")
+        if created is None:
+            continue
+        if hasattr(created, "tzinfo") and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if start <= created <= end:
+            result.append(x)
+    return result
+
+
 @router.get("/my-summary")
 async def my_report_summary(
     period: str = Query("monthly", enum=["daily", "weekly", "monthly", "all"]),
@@ -290,13 +307,10 @@ async def my_report_summary(
 ):
     """Aggregated stats for the current user's own transactions."""
     db = get_db()
-    query = db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"])
-
-    if period != "all":
-        start, end = _date_range(period)
-        query = query.where("created_at", ">=", start).where("created_at", "<=", end)
-
-    items = [{"id": d.id, **d.to_dict()} for d in query.get()]
+    # Fetch all user transactions with a single-field query (no composite index needed).
+    all_items = [{"id": d.id, **d.to_dict()} for d in
+                 db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"]).get()]
+    items = _filter_by_period(all_items, period)
 
     total_spent  = sum(x.get("total_amount", 0) for x in items)
     total_litres = sum(x.get("litres_dispensed", 0) for x in items)
@@ -354,19 +368,25 @@ async def my_comparative(
         prev_end   = curr_start
         prev_start = prev_end - delta
 
-    def _agg(start: datetime, end: datetime) -> dict:
-        docs  = (
-            db.collection(Collections.TRANSACTIONS)
-            .where("user_id", "==", current_user["uid"])
-            .where("created_at", ">=", start)
-            .where("created_at", "<=", end)
-            .get()
-        )
-        txns = [d.to_dict() for d in docs]
+    # Fetch all user transactions once (single-field equality = no composite index needed).
+    all_items = [d.to_dict() for d in
+                 db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"]).get()]
+
+    def _agg_from_items(items: list[dict], start: datetime, end: datetime) -> dict:
+        txns = _filter_by_period(items, "all")  # already fetched, filter manually
+        period_txns = []
+        for x in txns:
+            created = x.get("created_at")
+            if created is None:
+                continue
+            if hasattr(created, "tzinfo") and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if start <= created <= end:
+                period_txns.append(x)
         return {
-            "total_spent":  round(sum(x.get("total_amount", 0) for x in txns), 2),
-            "total_litres": round(sum(x.get("litres_dispensed", 0) for x in txns), 2),
-            "count":        len(txns),
+            "total_spent":  round(sum(x.get("total_amount", 0) for x in period_txns), 2),
+            "total_litres": round(sum(x.get("litres_dispensed", 0) for x in period_txns), 2),
+            "count":        len(period_txns),
         }
 
     def _pct(curr: float, prev: float) -> float:
@@ -374,8 +394,8 @@ async def my_comparative(
             return 0.0
         return round((curr - prev) / prev * 100, 1)
 
-    current  = _agg(curr_start, curr_end)
-    previous = _agg(prev_start, prev_end)
+    current  = _agg_from_items(all_items, curr_start, curr_end)
+    previous = _agg_from_items(all_items, prev_start, prev_end)
 
     return {
         "period":   period,
@@ -397,14 +417,11 @@ async def my_export(
 ):
     """Export the current user's transactions as PDF or CSV."""
     db = get_db()
-    query = db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"])
-
-    if period != "all":
-        start, end = _date_range(period)
-        query = query.where("created_at", ">=", start).where("created_at", "<=", end)
-
+    all_items = [{"id": d.id, **d.to_dict()} for d in
+                 db.collection(Collections.TRANSACTIONS).where("user_id", "==", current_user["uid"]).get()]
+    filtered  = _filter_by_period(all_items, period)
     raw_items = sorted(
-        [{"id": d.id, **d.to_dict()} for d in query.get()],
+        filtered,
         key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )

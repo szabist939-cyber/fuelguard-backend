@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 PKT = ZoneInfo("Asia/Karachi")
+FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
 
 
 def _init_cloudinary() -> bool:
@@ -34,6 +41,19 @@ def _init_cloudinary() -> bool:
         secure=True,
     )
     return True
+
+
+def _load_timestamp_font(size: int):
+    for font_path in FONT_PATHS:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except OSError:
+            continue
+
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
@@ -55,16 +75,12 @@ def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
     timestamp = captured_at.astimezone(PKT).strftime("Captured: %Y-%m-%d %I:%M:%S %p PKT")
 
     max_box_width = max(1, width - 24)
-    font_size = max(12, min(width, height) // 32)
+    font_size = max(20, min(width, height) // 18)
     while font_size >= 8:
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except OSError:
-            font = ImageFont.load_default()
-
+        font = _load_timestamp_font(font_size)
         bbox = draw.textbbox((0, 0), timestamp, font=font)
         text_width = bbox[2] - bbox[0]
-        padding_x = max(8, font_size // 2)
+        padding_x = max(12, font_size // 2)
         if text_width + (padding_x * 2) <= max_box_width or font_size == 8:
             break
         font_size -= 1
@@ -72,9 +88,9 @@ def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
     bbox = draw.textbbox((0, 0), timestamp, font=font)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
-    padding_x = max(8, font_size // 2)
-    padding_y = max(6, font_size // 3)
-    margin = min(max(8, font_size // 2), max(1, width // 12), max(1, height // 12))
+    padding_x = max(12, font_size // 2)
+    padding_y = max(10, font_size // 3)
+    margin = min(max(12, font_size // 2), max(1, width // 10), max(1, height // 10))
 
     box_width = min(text_width + (padding_x * 2), max(1, width - (margin * 2)))
     box_height = text_height + (padding_y * 2)
@@ -85,10 +101,10 @@ def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
 
     draw.rounded_rectangle(
         (left, top, right, bottom),
-        radius=max(6, font_size // 3),
-        fill=(0, 0, 0, 175),
-        outline=(255, 255, 255, 210),
-        width=max(1, font_size // 12),
+        radius=max(8, font_size // 3),
+        fill=(0, 0, 0, 225),
+        outline=(255, 255, 255, 245),
+        width=max(2, font_size // 10),
     )
     draw.text(
         (left + padding_x, top + padding_y),

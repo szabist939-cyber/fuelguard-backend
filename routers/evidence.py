@@ -4,10 +4,12 @@ import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import cloudinary
 import cloudinary.uploader
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from core.config import settings
 from core.dependencies import get_current_user, require_admin
@@ -17,6 +19,7 @@ from models.evidence import EvidenceResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+PKT = ZoneInfo("Asia/Karachi")
 
 
 def _init_cloudinary() -> bool:
@@ -31,6 +34,72 @@ def _init_cloudinary() -> bool:
         secure=True,
     )
     return True
+
+
+def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
+    """Return image bytes with a bottom-right Pakistan-time capture timestamp."""
+    try:
+        image = Image.open(BytesIO(contents))
+        image.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded evidence file must be a valid image",
+        ) from exc
+
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    draw = ImageDraw.Draw(image, "RGBA")
+    width, height = image.size
+    timestamp = captured_at.astimezone(PKT).strftime("Captured: %Y-%m-%d %I:%M:%S %p PKT")
+
+    max_box_width = max(1, width - 24)
+    font_size = max(12, min(width, height) // 32)
+    while font_size >= 8:
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except OSError:
+            font = ImageFont.load_default()
+
+        bbox = draw.textbbox((0, 0), timestamp, font=font)
+        text_width = bbox[2] - bbox[0]
+        padding_x = max(8, font_size // 2)
+        if text_width + (padding_x * 2) <= max_box_width or font_size == 8:
+            break
+        font_size -= 1
+
+    bbox = draw.textbbox((0, 0), timestamp, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    padding_x = max(8, font_size // 2)
+    padding_y = max(6, font_size // 3)
+    margin = min(max(8, font_size // 2), max(1, width // 12), max(1, height // 12))
+
+    box_width = min(text_width + (padding_x * 2), max(1, width - (margin * 2)))
+    box_height = text_height + (padding_y * 2)
+    left = max(margin, width - box_width - margin)
+    top = max(margin, height - box_height - margin)
+    right = max(left + 1, width - margin)
+    bottom = max(top + 1, height - margin)
+
+    draw.rounded_rectangle(
+        (left, top, right, bottom),
+        radius=max(6, font_size // 3),
+        fill=(0, 0, 0, 175),
+        outline=(255, 255, 255, 210),
+        width=max(1, font_size // 12),
+    )
+    draw.text(
+        (left + padding_x, top + padding_y),
+        timestamp,
+        fill=(255, 255, 255, 255),
+        font=font,
+    )
+
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=92, optimize=True)
+    return output.getvalue()
 
 
 @router.post("", response_model=EvidenceResponse, status_code=status.HTTP_201_CREATED)
@@ -55,7 +124,9 @@ async def upload_evidence(
         )
 
     evidence_id = str(uuid.uuid4())
-    contents = await file.read()
+    raw_contents = await file.read()
+    captured_at = datetime.now(timezone.utc)
+    contents = _add_capture_timestamp_box(raw_contents, captured_at)
 
     # ── Upload original to Cloudinary ─────────────────────────────────────────
     public_id = f"fuelguard/evidence/{transaction_id}/{evidence_id}"
@@ -81,7 +152,7 @@ async def upload_evidence(
     delete_at = datetime.now(timezone.utc) + timedelta(days=settings.EVIDENCE_RETENTION_DAYS)
     watermark_txt = (
         f"TXN:{transaction_id} | "
-        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        f"{captured_at.astimezone(PKT).strftime('%Y-%m-%d %H:%M:%S')} PKT"
     )
 
     doc_data = {
@@ -97,6 +168,7 @@ async def upload_evidence(
         "metadata": {
             "uploaded_by":       current_user["uid"],
             "original_filename": file.filename,
+            "capture_time_pkt":  captured_at.astimezone(PKT).isoformat(),
         },
         "watermark_text": watermark_txt,
         "delete_at":      delete_at,

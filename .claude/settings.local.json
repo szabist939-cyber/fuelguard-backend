@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -c ' *)",
+      "Bash(where pdflatex *)",
+      "Bash(where latexmk *)",
+      "Bash(winget list *)",
+      "Bash(python -c \"import subprocess; print\\('ok'\\)\")",
+      "Bash(winget install *)",
+      "Bash(python -c \"import pylatexenc; print\\('ok'\\)\")",
+      "Bash(choco --version)",
+      "Bash(scoop --version)",
+      "Read(//c/Program Files/MiKTeX/miktex/bin/x64/**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Users/PC/AppData/Local/Programs/MiKTeX/**)",
+      "Bash(find /c -name \"pdflatex.exe\")",
+      "Read(//c/Users/PC/**)",
+      "Bash(cmd /c \"where pdflatex\")",
+      "Bash(cmd /c \"dir \\\\\"C:\\\\Program Files\\\\MiKTeX\\\\\" /s /b 2>nul | findstr pdflatex\")",
+      "Read(//c/ProgramData/**)",
+      "Bash(/c/Users/PC/AppData/Local/Programs/MiKTeX/miktex/bin/x64/pdflatex.exe -interaction=nonstopmode -halt-on-error api_documentation.tex)",
+      "Bash(/c/Users/PC/AppData/Local/Programs/MiKTeX/miktex/bin/x64/pdflatex.exe -interaction=nonstopmode api_documentation.tex)",
+      "Bash(dart analyze *)"
+    ]
+  }
+}

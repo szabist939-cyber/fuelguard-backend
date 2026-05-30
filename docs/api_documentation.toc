@@ -1,0 +1,15 @@
+\contentsline {section}{\numberline {1}Authentication \normalfont \small \texttt {/api/v1/auth}}{2}{section.1}%
+\contentsline {section}{\numberline {2}Users \normalfont \small \texttt {/api/v1/users}}{4}{section.2}%
+\contentsline {section}{\numberline {3}Sessions \normalfont \small \texttt {/api/v1/sessions}}{6}{section.3}%
+\contentsline {section}{\numberline {4}Transactions \normalfont \small \texttt {/api/v1/transactions}}{8}{section.4}%
+\contentsline {section}{\numberline {5}Stations \normalfont \small \texttt {/api/v1/stations}}{10}{section.5}%
+\contentsline {section}{\numberline {6}Prices \normalfont \small \texttt {/api/v1/prices}}{12}{section.6}%
+\contentsline {section}{\numberline {7}Nozzles \normalfont \small \texttt {/api/v1/nozzles}}{14}{section.7}%
+\contentsline {section}{\numberline {8}Evidence \normalfont \small \texttt {/api/v1/evidence}}{16}{section.8}%
+\contentsline {section}{\numberline {9}Fraud Detection \normalfont \small \texttt {/api/v1/fraud}}{17}{section.9}%
+\contentsline {section}{\numberline {10}Fleet Management \normalfont \small \texttt {/api/v1/fleet}}{19}{section.10}%
+\contentsline {section}{\numberline {11}IoT Devices \normalfont \small \texttt {/api/v1/iot}}{21}{section.11}%
+\contentsline {section}{\numberline {12}Admin Dashboard \normalfont \small \texttt {/api/v1/admin}}{23}{section.12}%
+\contentsline {section}{\numberline {13}Reports \normalfont \small \texttt {/api/v1/reports}}{25}{section.13}%
+\contentsline {section}{Appendix — HTTP Status Codes}{27}{section*.2}%
+\contentsline {section}{Appendix — Base Firestore Collections}{27}{section*.3}%

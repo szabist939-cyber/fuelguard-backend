@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 import cloudinary
 import cloudinary.uploader
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from core.config import settings
 from core.dependencies import get_current_user, require_admin
@@ -20,13 +19,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 PKT = ZoneInfo("Asia/Karachi")
-FONT_PATHS = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "C:/Windows/Fonts/arialbd.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-)
 
 
 def _init_cloudinary() -> bool:
@@ -41,81 +33,6 @@ def _init_cloudinary() -> bool:
         secure=True,
     )
     return True
-
-
-def _load_timestamp_font(size: int):
-    for font_path in FONT_PATHS:
-        try:
-            return ImageFont.truetype(font_path, size)
-        except OSError:
-            continue
-
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
-        return ImageFont.load_default()
-
-
-def _add_capture_timestamp_box(contents: bytes, captured_at: datetime) -> bytes:
-    """Return image bytes with a bottom-right Pakistan-time capture timestamp."""
-    try:
-        image = Image.open(BytesIO(contents))
-        image.load()
-    except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded evidence file must be a valid image",
-        ) from exc
-
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    draw = ImageDraw.Draw(image, "RGBA")
-    width, height = image.size
-    timestamp = captured_at.astimezone(PKT).strftime("Captured: %Y-%m-%d %I:%M:%S %p PKT")
-
-    max_box_width = max(1, width - 24)
-    font_size = max(20, min(width, height) // 18)
-    while font_size >= 8:
-        font = _load_timestamp_font(font_size)
-        bbox = draw.textbbox((0, 0), timestamp, font=font)
-        text_width = bbox[2] - bbox[0]
-        padding_x = max(12, font_size // 2)
-        if text_width + (padding_x * 2) <= max_box_width or font_size == 8:
-            break
-        font_size -= 1
-
-    bbox = draw.textbbox((0, 0), timestamp, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    padding_x = max(12, font_size // 2)
-    padding_y = max(10, font_size // 3)
-    margin = min(max(12, font_size // 2), max(1, width // 10), max(1, height // 10))
-
-    box_width = min(text_width + (padding_x * 2), max(1, width - (margin * 2)))
-    box_height = text_height + (padding_y * 2)
-    left = max(margin, width - box_width - margin)
-    top = max(margin, height - box_height - margin)
-    right = max(left + 1, width - margin)
-    bottom = max(top + 1, height - margin)
-
-    draw.rounded_rectangle(
-        (left, top, right, bottom),
-        radius=max(8, font_size // 3),
-        fill=(0, 0, 0, 225),
-        outline=(255, 255, 255, 245),
-        width=max(2, font_size // 10),
-    )
-    draw.text(
-        (left + padding_x, top + padding_y),
-        timestamp,
-        fill=(255, 255, 255, 255),
-        font=font,
-    )
-
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=92, optimize=True)
-    return output.getvalue()
 
 
 @router.post("", response_model=EvidenceResponse, status_code=status.HTTP_201_CREATED)
@@ -140,9 +57,8 @@ async def upload_evidence(
         )
 
     evidence_id = str(uuid.uuid4())
-    raw_contents = await file.read()
     captured_at = datetime.now(timezone.utc)
-    contents = _add_capture_timestamp_box(raw_contents, captured_at)
+    contents = await file.read()
 
     # ── Upload original to Cloudinary ─────────────────────────────────────────
     public_id = f"fuelguard/evidence/{transaction_id}/{evidence_id}"

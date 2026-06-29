@@ -16,10 +16,13 @@ class Settings(BaseSettings):
 
     # Comma-separated list of allowed CORS origins.
     # Override in production: ALLOWED_ORIGINS="https://admin.fuelguard.com,https://app.fuelguard.com"
-    ALLOWED_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:8080",
-    ]
+    # Stored as a raw string (not List[str]) because pydantic-settings tries to
+    # JSON-decode list-typed env values, which breaks on a plain comma-separated string.
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
+
+    @property
+    def allowed_origins(self) -> List[str]:
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
 
     # ── Firebase ──────────────────────────────────────────────────────────────
     # For local dev: path to serviceAccountKey.json

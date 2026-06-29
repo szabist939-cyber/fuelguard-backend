@@ -97,7 +97,7 @@ async def get_fraud_patterns(_: dict = Depends(require_admin)):
     sorted_patterns = sorted(patterns.items(), key=lambda x: x[1], reverse=True)
     return {"patterns": [{"nozzle_id": k, "alert_count": v} for k, v in sorted_patterns]}
 
-
+# asd
 @router.get("/stats", response_model=FraudStats)
 async def fraud_stats(_: dict = Depends(require_admin)):
     db         = get_db()

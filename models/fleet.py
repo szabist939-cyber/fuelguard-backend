@@ -69,6 +69,31 @@ class ExpenseResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class CategoryBreakdown(BaseModel):
+    """One row of the fleet-wide expense breakdown."""
+    category: FuelCategory
+    amount: float
+    count: int
+    percentage: float = Field(ge=0, le=100, description="Share of total_amount")
+    litres: Optional[float] = None  # only meaningful for the fuel category
+
+
+class ExpenseSummaryResponse(BaseModel):
+    """
+    Aggregate view across the whole fleet (or one vehicle when filtered).
+
+    Every category in FuelCategory is always present — a zero row is more useful
+    to a chart than a missing key, and it keeps the UI free of null checks.
+    """
+    total_amount: float
+    total_count: int
+    total_litres: float = 0.0
+    vehicle_id: Optional[str] = None
+    month: Optional[int] = None
+    year: Optional[int] = None
+    by_category: List[CategoryBreakdown] = []
+
+
 class BudgetSet(BaseModel):
     vehicle_id: Optional[str] = None
     month: int = Field(ge=1, le=12)

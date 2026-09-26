@@ -42,6 +42,7 @@ class StationResponse(BaseModel):
     is_active: bool = True
     distance_km: Optional[float] = None  # populated in nearby searches
     current_prices: Optional[dict] = None
+    fraud_risk: Optional[dict] = None    # blacklist status, attached by the stations router
     created_at: Optional[datetime] = None
 
 

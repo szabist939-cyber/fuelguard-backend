@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from core.cache import TAG_DASHBOARD, TAG_FRAUD, invalidate
 from core.dependencies import get_current_user, require_admin
 from core.firebase import Collections, get_db
 from models.fraud import (
@@ -14,6 +15,7 @@ from models.fraud import (
     FraudFlagRequest,
     FraudStats,
 )
+from services import flagging_service
 from services.fraud_service import analyze_transaction_for_fraud
 
 router = APIRouter()
@@ -67,6 +69,7 @@ async def resolve_fraud_alert(
         "resolved_by": current_user["uid"],
         "resolved_at": datetime.now(timezone.utc),
     })
+    invalidate(TAG_FRAUD, TAG_DASHBOARD)
     return {"message": "Alert updated"}
 
 
@@ -76,8 +79,42 @@ async def analyze_fraud(transaction_id: str, _: dict = Depends(require_admin)):
     tx_doc = db.collection(Collections.TRANSACTIONS).document(transaction_id).get()
     if not tx_doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
-    alerts = analyze_transaction_for_fraud(db, tx_doc.to_dict())
-    return {"transaction_id": transaction_id, "alerts_generated": len(alerts), "alerts": alerts}
+    tx     = tx_doc.to_dict()
+    alerts = analyze_transaction_for_fraud(db, tx)
+
+    # Check outcomes that point at the attendant or the station also flow into
+    # the flagging engine. record_flag deduplicates on transaction + trigger,
+    # so re-running the analysis cannot inflate an entity's count.
+    flagging: dict = {"flags": [], "escalated": False, "level": None}
+    trigger_map = {
+        "price_mismatch":  ("price_mismatch", "high"),
+        "unusual_volume":  ("under_dispensing_pattern", "high"),
+        "tamper_detected": ("tamper_detected", "critical"),
+    }
+    for alert in alerts:
+        trigger = trigger_map.get(alert["alert_type"])
+        if not trigger:
+            continue
+        res = flagging_service.flag_transaction_entities(
+            db, tx,
+            trigger_type=trigger[0], severity=trigger[1],
+            description=alert["description"],
+        )
+        flagging["flags"].extend(res["flags"])
+        if res["escalated"] and not flagging["escalated"]:
+            flagging.update({"escalated": True, "level": res["level"], "blacklist": res["blacklist"]})
+
+    return {
+        "transaction_id": transaction_id,
+        "alerts_generated": len(alerts),
+        "alerts": alerts,
+        "flagging": {
+            "flags_recorded": len(flagging["flags"]),
+            "escalated": flagging["escalated"],
+            "level": flagging["level"],
+            "blacklist": flagging.get("blacklist"),
+        },
+    }
 
 
 @router.get("/patterns")
@@ -141,10 +178,17 @@ async def add_to_blacklist(
     payload: BlacklistEntry,
     current_user: dict = Depends(require_admin),
 ):
+    """
+    Legacy blacklist write kept for API compatibility. Entries are created in
+    the full flagging schema (level 1, active) so the escalation engine and
+    the station risk lookups treat them identically.
+    """
     db = get_db()
     existing = (
         db.collection(Collections.BLACKLIST)
+        .where("entity_type", "==", payload.entity_type.value)
         .where("entity_id", "==", payload.entity_id)
+        .where("status", "in", ["active", "under_review"])
         .limit(1)
         .get()
     )
@@ -154,13 +198,25 @@ async def add_to_blacklist(
             detail="Entity is already blacklisted",
         )
 
+    now = datetime.now(timezone.utc)
     entry_id = str(uuid.uuid4())
     data = {
         "id": entry_id,
         **payload.model_dump(),
         "entity_type": payload.entity_type.value,
+        "level": 1,
+        "status": "active",
+        "restrictions": flagging_service.derive_restrictions(payload.entity_type.value, 1),
+        "flags_count": 0,
+        "window_days": flagging_service.get_rules(db).flag_window_days,
+        "auto_escalated": False,
+        "entity_name": flagging_service._display_name(db, payload.entity_type.value, payload.entity_id),
         "flagged_by": payload.flagged_by or current_user["uid"],
-        "created_at": datetime.now(timezone.utc),
+        "removed_by": None,
+        "removed_at": None,
+        "removal_note": None,
+        "created_at": now,
+        "updated_at": now,
     }
     db.collection(Collections.BLACKLIST).document(entry_id).set(data)
     return BlacklistResponse(**data)
@@ -180,6 +236,11 @@ async def flag_transaction(
     payload: FraudFlagRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    """
+    Flag a transaction from the mobile app. The fraud alert always lands in
+    the alerts feed; the entity flagging engine additionally fires when the
+    reported discrepancy crosses the configured percentage threshold.
+    """
     db     = get_db()
     tx_doc = db.collection(Collections.TRANSACTIONS).document(payload.transaction_id).get()
     if not tx_doc.exists:
@@ -205,4 +266,37 @@ async def flag_transaction(
     db.collection(Collections.TRANSACTIONS).document(payload.transaction_id).update(
         {"is_flagged": True}
     )
-    return {"alert_id": alert_id, "message": "Transaction flagged"}
+    invalidate(TAG_FRAUD, TAG_DASHBOARD)
+
+    # Discrepancy percentage from explicit reading, or derived from the pair.
+    discrepancy_percent = payload.discrepancy_percent
+    if discrepancy_percent is None and payload.flowmeter_litres:
+        discrepancy_percent = round(
+            (payload.dispenser_litres or tx.get("litres_dispensed") or 0)
+            / payload.flowmeter_litres * 100 - 100, 2
+        )
+
+    flagging_result = None
+    rules = flagging_service.get_rules(db)
+    if discrepancy_percent is not None and discrepancy_percent >= rules.discrepancy_threshold_percent:
+        res = flagging_service.flag_transaction_entities(
+            db, tx,
+            trigger_type="flow_discrepancy",
+            severity=payload.severity.value,
+            description=payload.reason,
+            source="automatic",
+            discrepancy_percent=discrepancy_percent,
+            created_by=current_user["uid"],
+        )
+        flagging_result = {
+            "flags_recorded": len(res["flags"]),
+            "escalated": res["escalated"],
+            "level": res["level"],
+            "blacklist": res["blacklist"],
+        }
+
+    return {
+        "alert_id": alert_id,
+        "message": "Transaction flagged",
+        "flagging": flagging_result,
+    }

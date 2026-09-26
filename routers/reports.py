@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from core.dependencies import get_current_user, require_admin
+from core.cache import cache
 from core.firebase import Collections, get_db
 from services.report_service import (
     build_sales_report,
@@ -216,6 +217,12 @@ async def export_report(
 
 @router.get("/charts/transactions", dependencies=[Depends(require_admin)])
 async def chart_transactions(period: str = Query("weekly")):
+    async def _load():
+        return await _chart_transactions_impl(period)
+    return await cache.get_or_set(f"charts:transactions:{period}", 60, _load, tag="transactions")
+
+
+async def _chart_transactions_impl(period: str):
     db = get_db()
     start, end = _date_range(period)
     docs = (
@@ -241,6 +248,12 @@ async def chart_transactions(period: str = Query("weekly")):
 
 @router.get("/charts/revenue", dependencies=[Depends(require_admin)])
 async def chart_revenue(period: str = Query("weekly")):
+    async def _load():
+        return await _chart_revenue_impl(period)
+    return await cache.get_or_set(f"charts:revenue:{period}", 60, _load, tag="transactions")
+
+
+async def _chart_revenue_impl(period: str):
     db = get_db()
     start, end = _date_range(period)
     docs = (
@@ -262,6 +275,12 @@ async def chart_revenue(period: str = Query("weekly")):
 
 @router.get("/charts/fraud", dependencies=[Depends(require_admin)])
 async def chart_fraud(period: str = Query("monthly")):
+    async def _load():
+        return await _chart_fraud_impl(period)
+    return await cache.get_or_set(f"charts:fraud:{period}", 60, _load, tag="fraud")
+
+
+async def _chart_fraud_impl(period: str):
     db = get_db()
     start, end = _date_range(period)
     docs = (

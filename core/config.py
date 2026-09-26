@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     # ── Evidence retention ────────────────────────────────────────────────────
     EVIDENCE_RETENTION_DAYS: int = 90
 
+    # ── Rate limiting (per client IP, sliding one-minute windows) ─────────────
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = 120
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+    RATE_LIMIT_IOT_PER_MINUTE: int = 600
+    RATE_LIMIT_WRITE_PER_MINUTE: int = 60
+
+    # ── IoT ───────────────────────────────────────────────────────────────────
+    TELEMETRY_RETENTION_DAYS: int = 30
+
     @field_validator("JWT_SECRET_KEY")
     @classmethod
     def jwt_secret_must_be_strong(cls, v: str) -> str:

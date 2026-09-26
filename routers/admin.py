@@ -5,37 +5,42 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from core.cache import TAG_DASHBOARD, TAG_NOZZLES, TAG_TRANSACTIONS, cache, invalidate
 from core.dependencies import require_admin
 from core.firebase import Collections, get_db
 from core.security import hash_password
 from models.user import EmployeeUpdate, UserCreate
+from services import flagging_service
 
 router = APIRouter()
 
 
 @router.get("/overview")
 async def dashboard_overview(_: dict = Depends(require_admin)):
-    db          = get_db()
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    async def _load():
+        db          = get_db()
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    active_sessions_docs = db.collection(Collections.SESSIONS).where("status", "==", "active").get()
-    tx_today_docs        = db.collection(Collections.TRANSACTIONS).where("created_at", ">=", today_start).get()
-    open_alert_docs      = db.collection(Collections.FRAUD_ALERTS).where("status", "==", "open").get()
+        active_sessions_docs = db.collection(Collections.SESSIONS).where("status", "==", "active").get()
+        tx_today_docs        = db.collection(Collections.TRANSACTIONS).where("created_at", ">=", today_start).get()
+        open_alert_docs      = db.collection(Collections.FRAUD_ALERTS).where("status", "==", "open").get()
 
-    tx_today      = [d.to_dict() for d in tx_today_docs]
-    revenue_today = sum(t.get("total_amount", 0) for t in tx_today)
+        tx_today      = [d.to_dict() for d in tx_today_docs]
+        revenue_today = sum(t.get("total_amount", 0) for t in tx_today)
 
-    litres_list   = [t.get("litres_dispensed", 0) for t in tx_today if t.get("litres_dispensed")]
-    avg_litres    = round(sum(litres_list) / len(litres_list), 2) if litres_list else 0.0
+        litres_list   = [t.get("litres_dispensed", 0) for t in tx_today if t.get("litres_dispensed")]
+        avg_litres    = round(sum(litres_list) / len(litres_list), 2) if litres_list else 0.0
 
-    return {
-        "active_sessions": len(list(active_sessions_docs)),
-        "revenue_today_pkr": round(revenue_today, 2),
-        "transactions_today": len(tx_today),
-        "open_fraud_alerts": len(list(open_alert_docs)),
-        "avg_litres_per_transaction": avg_litres,
-        "generated_at": datetime.now(timezone.utc),
-    }
+        return {
+            "active_sessions": len(list(active_sessions_docs)),
+            "revenue_today_pkr": round(revenue_today, 2),
+            "transactions_today": len(tx_today),
+            "open_fraud_alerts": len(list(open_alert_docs)),
+            "avg_litres_per_transaction": avg_litres,
+            "generated_at": datetime.now(timezone.utc),
+        }
+
+    return await cache.get_or_set("admin:overview", 15, _load, tag=TAG_DASHBOARD)
 
 
 @router.get("/nozzles/live")
@@ -61,6 +66,12 @@ async def list_employees(
     for d in docs:
         data = d.to_dict()
         data.pop("password_hash", None)
+        entry = flagging_service.get_active_blacklist_entry(db, "employee", d.id)
+        data["blacklist"] = (
+            {"level": entry.get("level"), "status": entry.get("status"),
+             "flags_count": entry.get("flags_count", 0)}
+            if entry else None
+        )
         employees.append(data)
     return {"total": len(employees), "items": employees}
 
@@ -135,7 +146,23 @@ async def list_complaints(
     if complaint_status:
         query = query.where("status", "==", complaint_status)
     docs = query.order_by("created_at", direction="DESCENDING").limit(limit).get()
-    return [{"id": d.id, **d.to_dict()} for d in docs]
+
+    complaints = []
+    user_ids = {d.to_dict().get("user_id") for d in docs if d.to_dict().get("user_id")}
+    user_names: dict[str, dict] = {}
+    for uid in user_ids:
+        udoc = db.collection(Collections.USERS).document(uid).get()
+        if udoc.exists:
+            u = udoc.to_dict()
+            user_names[uid] = {"name": u.get("full_name"), "email": u.get("email")}
+
+    for d in docs:
+        data = {"id": d.id, **d.to_dict()}
+        who = user_names.get(data.get("user_id"))
+        data["user_name"] = who["name"] if who else None
+        data["user_email"] = who["email"] if who else None
+        complaints.append(data)
+    return complaints
 
 
 @router.post("/complaints", status_code=status.HTTP_201_CREATED)
@@ -147,12 +174,14 @@ async def submit_complaint(
 ):
     db           = get_db()
     complaint_id = str(uuid.uuid4())
+    entry        = flagging_service.get_active_blacklist_entry(db, "customer", user_id)
     data         = {
         "id": complaint_id,
         "user_id": user_id,
         "subject": subject,
         "description": description,
         "status": "open",
+        "requires_evidence": bool(entry and entry.get("status") == "active"),
         "created_at": datetime.now(timezone.utc),
     }
     db.collection(Collections.COMPLAINTS).document(complaint_id).set(data)
@@ -164,17 +193,49 @@ async def update_complaint_status(
     complaint_id: str,
     complaint_status: str = Query(..., alias="status"),
     resolution_note: str | None = Query(None),
-    _: dict = Depends(require_admin),
+    outcome: str | None = Query(None, description="valid | invalid — an invalid claim flags the customer"),
+    current_user: dict = Depends(require_admin),
 ):
     db  = get_db()
     ref = db.collection(Collections.COMPLAINTS).document(complaint_id)
-    if not ref.get().exists:
+    doc = ref.get()
+    if not doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Complaint not found")
     update: dict = {"status": complaint_status, "updated_at": datetime.now(timezone.utc)}
     if resolution_note:
         update["resolution_note"] = resolution_note
+    if outcome:
+        if outcome not in ("valid", "invalid"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Outcome must be valid or invalid",
+            )
+        update["outcome"] = outcome
     ref.update(update)
-    return {"message": "Complaint updated"}
+
+    # Repeatedly disputing valid fueling is itself a fraud signal. Resolving a
+    # complaint as invalid feeds the customer side of the escalation ladder.
+    flagging_result = None
+    if outcome == "invalid":
+        complaint = doc.to_dict()
+        user_id = complaint.get("user_id")
+        if user_id:
+            res = flagging_service.record_flag(
+                db,
+                entity_type="customer",
+                entity_id=user_id,
+                trigger_type="invalid_claim",
+                source="dispute",
+                description=f"Complaint resolved as invalid: {complaint.get('subject', 'unspecified claim')}",
+                severity="medium",
+                created_by=current_user["uid"],
+            )
+            flagging_result = {
+                "escalated": res["escalated"],
+                "level": res["level"],
+            }
+
+    return {"message": "Complaint updated", "flagging": flagging_result}
 
 
 @router.get("/complaint-stats")
@@ -197,36 +258,44 @@ async def nozzle_monitoring(
     limit: int = Query(100, ge=1, le=500),
     _: dict = Depends(require_admin),
 ):
-    db    = get_db()
-    query = db.collection(Collections.NOZZLES)
-    if nozzle_status:
-        query = query.where("status", "==", nozzle_status)
-    if station_id:
-        query = query.where("station_id", "==", station_id)
-    docs = query.limit(limit).get()
+    async def _load():
+        db    = get_db()
+        query = db.collection(Collections.NOZZLES)
+        if nozzle_status:
+            query = query.where("status", "==", nozzle_status)
+        if station_id:
+            query = query.where("station_id", "==", station_id)
+        docs = query.limit(limit).get()
 
-    nozzles = []
-    for d in docs:
-        data = {"id": d.id, **d.to_dict()}
-        # Attach today's transaction count for each nozzle
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        tx_docs = (
-            db.collection(Collections.TRANSACTIONS)
-            .where("nozzle_id", "==", d.id)
-            .where("created_at", ">=", today_start)
-            .get()
-        )
-        tx_list = [t.to_dict() for t in tx_docs]
-        data["transactions_today"]    = len(tx_list)
-        data["litres_today"]          = round(sum(t.get("litres_dispensed", 0) for t in tx_list), 2)
-        data["revenue_today_pkr"]     = round(sum(t.get("total_amount", 0) for t in tx_list), 2)
-        nozzles.append(data)
+        nozzles = []
+        for d in docs:
+            data = {"id": d.id, **d.to_dict()}
+            # Attach today's transaction count for each nozzle
+            tx_docs = (
+                db.collection(Collections.TRANSACTIONS)
+                .where("nozzle_id", "==", d.id)
+                .where("created_at", ">=", today_start)
+                .get()
+            )
+            tx_list = [t.to_dict() for t in tx_docs]
+            data["transactions_today"]    = len(tx_list)
+            data["litres_today"]          = round(sum(t.get("litres_dispensed", 0) for t in tx_list), 2)
+            data["revenue_today_pkr"]     = round(sum(t.get("total_amount", 0) for t in tx_list), 2)
+            nozzles.append(data)
 
-    return {"total": len(nozzles), "items": nozzles}
+        return {"total": len(nozzles), "items": nozzles}
+
+    key = f"admin:nozzle-monitoring:{nozzle_status or 'all'}:{station_id or 'all'}"
+    return await cache.get_or_set(key, 10, _load, tag=TAG_NOZZLES)
 
 
 @router.get("/analytics")
 async def business_analytics(_: dict = Depends(require_admin)):
+    return await _analytics_cached()
+
+
+async def _analytics_impl():
     db          = get_db()
     now         = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -259,3 +328,13 @@ async def business_analytics(_: dict = Depends(require_admin)):
         "open_fraud_alerts": fraud_count,
         "active_nozzles_now": active_nozzles,
     }
+
+
+async def _analytics_cached():
+    return await cache.get_or_set("admin:analytics", 30, _analytics_impl, tag=TAG_DASHBOARD)
+
+
+@router.get("/cache-stats")
+async def cache_stats(_: dict = Depends(require_admin)):
+    """Observability for the in-process cache: hit rate and live entries."""
+    return cache.stats()

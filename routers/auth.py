@@ -163,6 +163,52 @@ async def login(payload: UserLoginWithFirebase):
     )
 
 
+@router.post("/login-password", response_model=TokenResponse)
+async def login_with_password(payload: UserLogin):
+    """
+    Email + password login for the web admin panel.
+
+    Checks the bcrypt hash stored in Firestore, falling back to Firebase's
+    Identity Toolkit REST API when the hash is stale (e.g. after a reset that
+    only updated Firebase Auth). The Flutter app is unaffected — it keeps
+    using Firebase ID tokens through /auth/login.
+    """
+    db  = get_db()
+    docs = db.collection(Collections.USERS).where("email", "==", payload.email).limit(1).get()
+    if not docs:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    user = docs[0].to_dict()
+
+    password_ok = False
+    if user.get("password_hash"):
+        password_ok = verify_password(payload.password, user["password_hash"])
+    if not password_ok:
+        password_ok = await _verify_via_firebase(payload.email, payload.password)
+    if not password_ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    if not user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated. Contact support.",
+        )
+
+    token_payload = {"uid": user["uid"], "role": user["role"]}
+    return TokenResponse(
+        access_token=create_access_token(token_payload),
+        refresh_token=create_refresh_token(token_payload),
+        uid=user["uid"],
+        role=user["role"],
+    )
+
+
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(_: dict = Depends(get_current_user)):
     # Stateless JWT — the client discards its tokens.

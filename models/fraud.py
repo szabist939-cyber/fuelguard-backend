@@ -16,6 +16,7 @@ class FraudAlertType(str, Enum):
     BLACKLISTED_USER  = "blacklisted_user"
     PATTERN_ANOMALY   = "pattern_anomaly"
     MANUAL_FLAG       = "manual_flag"
+    BLACKLIST_ESCALATION = "blacklist_escalation"
 
 
 class FraudAlertStatus(str, Enum):
@@ -62,6 +63,12 @@ class FraudFlagRequest(BaseModel):
     transaction_id: str
     reason: str
     severity: FraudSeverity = FraudSeverity.MEDIUM
+    # Sensor readings from the hardware session. When supplied, the flagging
+    # engine compares the discrepancy against the configured percentage
+    # threshold and flags the attendant and station behind the transaction.
+    dispenser_litres: Optional[float] = None
+    flowmeter_litres: Optional[float] = None
+    discrepancy_percent: Optional[float] = None
 
 
 class BlacklistEntry(BaseModel):

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
+from core.cache import TAG_DASHBOARD, TAG_NOZZLES, TAG_TRANSACTIONS, invalidate
 from core.dependencies import get_current_user, require_admin
 from core.firebase import Collections, get_db
 from models.transaction import (
@@ -12,6 +13,7 @@ from models.transaction import (
     TransactionCreate,
     TransactionResponse,
 )
+from services import flagging_service
 from services.report_service import generate_receipt_pdf
 
 router = APIRouter()
@@ -33,6 +35,21 @@ async def create_transaction(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Session is not active",
+        )
+
+    # Blacklist enforcement runs before anything is written. A level 3
+    # attendant is suspended and cannot dispense; lower levels travel as
+    # stamps the admin panel can filter on.
+    enforcement = flagging_service.enforce_transaction_blacklists(
+        db,
+        employee_id=payload.employee_id,
+        customer_id=payload.user_id,
+        payment_method=payload.payment_method.value,
+    )
+    if enforcement["rejected"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=enforcement["rejected"],
         )
 
     total_amount = round(payload.litres_dispensed * payload.price_per_litre, 2)
@@ -60,9 +77,29 @@ async def create_transaction(
         "receipt_url": None,
         "evidence_url": None,
         "is_flagged": False,
+        "disputed": False,
+        **enforcement["stamps"],
         "created_at": datetime.now(timezone.utc),
     }
     db.collection(Collections.TRANSACTIONS).document(tx_id).set(data)
+    invalidate(TAG_TRANSACTIONS, TAG_DASHBOARD, TAG_NOZZLES)
+
+    # The customer's notification feed is real data, not decoration: every
+    # completed fill lands here with the verified numbers.
+    db.collection(Collections.NOTIFICATIONS).add({
+        "id": str(uuid.uuid4()),
+        "type": "transaction_completed",
+        "audience": "user",
+        "user_id": payload.user_id,
+        "title": "Transaction completed",
+        "body": (
+            f"{payload.litres_dispensed:.1f} L of {payload.fuel_type} verified"
+            f" for PKR {total_amount:,.0f}."
+        ),
+        "transaction_id": tx_id,
+        "is_read": False,
+        "created_at": datetime.now(timezone.utc),
+    })
 
     # Close the session atomically after the transaction is recorded
     db.collection(Collections.SESSIONS).document(payload.session_id).update({
@@ -249,4 +286,5 @@ async def apply_price_update(
         "total_amount": new_total,
         "price_updated_reason": payload.reason,
     })
+    invalidate(TAG_TRANSACTIONS, TAG_DASHBOARD)
     return {"message": "Price updated", "new_total_amount": new_total}

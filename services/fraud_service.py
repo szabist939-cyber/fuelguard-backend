@@ -92,7 +92,8 @@ def analyze_transaction_for_fraud(db, transaction: dict) -> list[dict[str, Any]]
             blacklisted = (
                 db.collection(Collections.BLACKLIST)
                 .where("entity_id", "==", user_id)
-                .where("entity_type", "==", "user")
+                .where("entity_type", "in", ["user", "customer"])
+                .where("status", "in", ["active", "under_review"])
                 .limit(1)
                 .get()
             )

@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from core.cache import TAG_STATIONS, cache, invalidate
 from core.dependencies import get_current_user, require_admin
 from core.firebase import Collections, get_db
+from models.flagging import FraudRiskStatus
 from models.station import StationCreate, StationResponse, StationUpdate
+from services import flagging_service
 
 router = APIRouter()
 
@@ -24,6 +27,21 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def _reduced_visibility_enabled(db) -> bool:
+    return flagging_service.get_rules(db).reduced_visibility_enabled
+
+
+def _sort_with_risk(items: list[dict], distance_key: str, enabled: bool) -> None:
+    """
+    Blacklisted stations sink below every honest one; within each group the
+    original distance ordering is preserved.
+    """
+    if enabled:
+        items.sort(key=lambda x: (x["fraud_risk"].is_blacklisted, x[distance_key]))
+    else:
+        items.sort(key=lambda x: x[distance_key])
+
+
 # ── Static / user-scoped routes MUST come before parameterized /{station_id} ──
 
 @router.get("/nearby")
@@ -34,18 +52,27 @@ async def nearby_stations(
     fuel_type: str | None = Query(None),
     _: dict = Depends(get_current_user),
 ):
-    db      = get_db()
-    docs    = db.collection(Collections.STATIONS).where("is_active", "==", True).get()
-    results = []
-    for d in docs:
-        data = d.to_dict()
-        dist = _haversine(latitude, longitude, data["latitude"], data["longitude"])
-        if dist > radius_km:
-            continue
-        if fuel_type and fuel_type not in data.get("fuel_types_available", []):
-            continue
-        results.append({**data, "id": d.id, "distance_km": round(dist, 2)})
-    results.sort(key=lambda x: x["distance_km"])
+    async def _load():
+        db      = get_db()
+        docs    = db.collection(Collections.STATIONS).where("is_active", "==", True).get()
+        results = []
+        for d in docs:
+            data = d.to_dict()
+            dist = _haversine(latitude, longitude, data["latitude"], data["longitude"])
+            if dist > radius_km:
+                continue
+            if fuel_type and fuel_type not in data.get("fuel_types_available", []):
+                continue
+            results.append({**data, "id": d.id, "distance_km": round(dist, 2)})
+
+        risk_map = flagging_service.get_fraud_risk_map(db, [r["id"] for r in results])
+        for r in results:
+            r["fraud_risk"] = (risk_map.get(r["id"]) or FraudRiskStatus.clean()).model_dump(mode="json")
+        _sort_with_risk(results, "distance_km", _reduced_visibility_enabled(db))
+        return results
+
+    key = f"stations:nearby:{latitude:.4f}:{longitude:.4f}:{radius_km}:{fuel_type or 'any'}"
+    results = await cache.get_or_set(key, 10, _load, tag=TAG_STATIONS)
     return results
 
 
@@ -59,23 +86,32 @@ async def route_based_stations(
     _: dict = Depends(get_current_user),
 ):
     """Stations within a buffer of the straight-line route midpoint."""
-    db            = get_db()
-    docs          = db.collection(Collections.STATIONS).where("is_active", "==", True).get()
     mid_lat       = (origin_lat + dest_lat) / 2
     mid_lng       = (origin_lng + dest_lng) / 2
     route_len_km  = _haversine(origin_lat, origin_lng, dest_lat, dest_lng)
     buffer_km     = min(route_len_km / 2, 10.0)
 
-    results = []
-    for d in docs:
-        data         = d.to_dict()
-        dist_to_mid  = _haversine(mid_lat, mid_lng, data["latitude"], data["longitude"])
-        if dist_to_mid > buffer_km:
-            continue
-        if fuel_type and fuel_type not in data.get("fuel_types_available", []):
-            continue
-        results.append({**data, "id": d.id, "distance_from_route_km": round(dist_to_mid, 2)})
-    results.sort(key=lambda x: x["distance_from_route_km"])
+    async def _load():
+        db   = get_db()
+        docs = db.collection(Collections.STATIONS).where("is_active", "==", True).get()
+        results = []
+        for d in docs:
+            data         = d.to_dict()
+            dist_to_mid  = _haversine(mid_lat, mid_lng, data["latitude"], data["longitude"])
+            if dist_to_mid > buffer_km:
+                continue
+            if fuel_type and fuel_type not in data.get("fuel_types_available", []):
+                continue
+            results.append({**data, "id": d.id, "distance_from_route_km": round(dist_to_mid, 2)})
+
+        risk_map = flagging_service.get_fraud_risk_map(db, [r["id"] for r in results])
+        for r in results:
+            r["fraud_risk"] = (risk_map.get(r["id"]) or FraudRiskStatus.clean()).model_dump(mode="json")
+        _sort_with_risk(results, "distance_from_route_km", _reduced_visibility_enabled(db))
+        return results
+
+    key = f"stations:route:{origin_lat:.4f}:{origin_lng:.4f}:{dest_lat:.4f}:{dest_lng:.4f}:{fuel_type or 'any'}"
+    results = await cache.get_or_set(key, 10, _load, tag=TAG_STATIONS)
     return results
 
 
@@ -151,8 +187,16 @@ async def list_stations(
         data = {**d.to_dict(), "id": d.id}
         if fuel_type and fuel_type not in data.get("fuel_types_available", []):
             continue
-        stations.append(StationResponse(**data))
-    return stations
+        stations.append(data)
+
+    risk_map = flagging_service.get_fraud_risk_map(db, [s["id"] for s in stations])
+    enriched = []
+    for s in stations:
+        s["fraud_risk"] = (risk_map.get(s["id"]) or FraudRiskStatus.clean()).model_dump(mode="json")
+        enriched.append(StationResponse(**s))
+    if _reduced_visibility_enabled(db):
+        enriched.sort(key=lambda s: (s.fraud_risk.is_blacklisted, s.name))
+    return enriched
 
 
 @router.post("", response_model=StationResponse, status_code=status.HTTP_201_CREATED)
@@ -166,6 +210,7 @@ async def create_station(payload: StationCreate, _: dict = Depends(require_admin
         "created_at": datetime.now(timezone.utc),
     }
     db.collection(Collections.STATIONS).document(station_id).set(data)
+    invalidate(TAG_STATIONS)
     return StationResponse(**data)
 
 
@@ -177,7 +222,13 @@ async def get_station(station_id: str, _: dict = Depends(get_current_user)):
     doc = db.collection(Collections.STATIONS).document(station_id).get()
     if not doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Station not found")
-    return StationResponse(**{**doc.to_dict(), "id": doc.id})
+    data = {**doc.to_dict(), "id": doc.id}
+    entry = flagging_service.get_active_blacklist_entry(db, "station", station_id)
+    if entry and entry.get("status") == "active":
+        data["fraud_risk"] = FraudRiskStatus.flagged(int(entry.get("level") or 1)).model_dump(mode="json")
+    else:
+        data["fraud_risk"] = FraudRiskStatus.clean().model_dump(mode="json")
+    return StationResponse(**data)
 
 
 @router.put("/{station_id}", response_model=StationResponse)
@@ -192,6 +243,7 @@ async def update_station(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Station not found")
     updates = payload.model_dump(exclude_none=True)
     ref.update(updates)
+    invalidate(TAG_STATIONS)
     return StationResponse(**{**ref.get().to_dict(), "id": station_id})
 
 
@@ -202,3 +254,4 @@ async def delete_station(station_id: str, _: dict = Depends(require_admin)):
     if not ref.get().exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Station not found")
     ref.delete()
+    invalidate(TAG_STATIONS)

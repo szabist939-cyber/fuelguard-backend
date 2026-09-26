@@ -93,6 +93,8 @@ class Collections:
     FLEET_VEHICLES  = "fleet_vehicles"
     FLEET_EXPENSES  = "fleet_expenses"
     FLEET_DRIVERS   = "fleet_drivers"
+    FLAGS           = "flags"
+    FLAGGING_RULES  = "flagging_rules"
     IOT_DEVICES     = "iot_devices"
     IOT_FIRMWARE    = "iot_firmware"
     OTP_STORE       = "otp_store"

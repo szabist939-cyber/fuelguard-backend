@@ -19,6 +19,7 @@ class VehicleCreate(BaseModel):
     year: int
     fuel_type: str
     tank_capacity: float = Field(gt=0, description="Tank capacity in litres")
+    odometer_km: Optional[float] = Field(default=None, ge=0, description="Current odometer reading")
     owner_uid: Optional[str] = None
 
 
@@ -27,6 +28,7 @@ class VehicleUpdate(BaseModel):
     model: Optional[str] = None
     fuel_type: Optional[str] = None
     tank_capacity: Optional[float] = None
+    odometer_km: Optional[float] = Field(default=None, ge=0)
     is_active: Optional[bool] = None
 
 
@@ -38,6 +40,7 @@ class VehicleResponse(BaseModel):
     year: int
     fuel_type: str
     tank_capacity: float
+    odometer_km: Optional[float] = None
     owner_uid: Optional[str] = None
     assigned_driver_uid: Optional[str] = None
     is_active: bool = True
@@ -51,6 +54,7 @@ class ExpenseCreate(BaseModel):
     category: FuelCategory = FuelCategory.FUEL
     amount: float = Field(gt=0)
     litres: Optional[float] = None
+    odometer_km: Optional[float] = Field(default=None, ge=0, description="Odometer at fill time")
     station_id: Optional[str] = None
     description: Optional[str] = None
     expense_date: Optional[date] = None
@@ -63,6 +67,7 @@ class ExpenseResponse(BaseModel):
     category: FuelCategory
     amount: float
     litres: Optional[float] = None
+    odometer_km: Optional[float] = None
     station_id: Optional[str] = None
     description: Optional[str] = None
     expense_date: Optional[date] = None
@@ -110,6 +115,8 @@ class BudgetResponse(BaseModel):
     budget_amount: float
     spent_amount: float = 0.0
     remaining: float = 0.0
+    over_budget: bool = False
+    percentage: float = 0.0
 
 
 class DriverCreate(BaseModel):

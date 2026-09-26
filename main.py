@@ -8,9 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings, validate_production_settings
 from core.firebase import init_firebase
+from core.rate_limit import register_rate_limiter
 from routers import (
-    admin, auth, evidence, fleet, fraud, iot,
-    nozzles, prices, reports, sessions, stations,
+    admin, auth, evidence, fleet, flagging, fraud, iot,
+    notifications, nozzles, prices, reports, sessions, stations,
     transactions, users,
 )
 
@@ -49,6 +50,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+register_rate_limiter(app)
+
 PREFIX = settings.API_V1_PREFIX
 
 app.include_router(auth.router,         prefix=PREFIX + "/auth",         tags=["Auth"])
@@ -59,6 +62,8 @@ app.include_router(transactions.router, prefix=PREFIX + "/transactions", tags=["
 app.include_router(reports.router,      prefix=PREFIX + "/reports",      tags=["Reports"])
 app.include_router(evidence.router,     prefix=PREFIX + "/evidence",     tags=["Evidence"])
 app.include_router(fraud.router,        prefix=PREFIX + "/fraud",        tags=["Fraud"])
+app.include_router(flagging.router,     prefix=PREFIX + "/flagging",     tags=["Flagging & Blacklist"])
+app.include_router(notifications.router, prefix=PREFIX + "/notifications", tags=["Notifications"])
 app.include_router(stations.router,     prefix=PREFIX + "/stations",     tags=["Stations"])
 app.include_router(prices.router,       prefix=PREFIX + "/prices",       tags=["Prices"])
 app.include_router(admin.router,        prefix=PREFIX + "/admin",        tags=["Admin"])

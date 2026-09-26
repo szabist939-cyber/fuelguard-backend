@@ -43,3 +43,15 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Agent tooling
+.claude/
+.agents/
+
+# LaTeX build junk
+*.aux
+*.out
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz

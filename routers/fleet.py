@@ -125,6 +125,11 @@ async def fuel_consumption(vehicle_id: str, current_user: dict = Depends(get_cur
     doc = db.collection(Collections.FLEET_VEHICLES).document(vehicle_id).get()
     if not doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    vehicle_data = doc.to_dict()
+    if vehicle_data.get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     expenses = (
         db.collection(Collections.FLEET_EXPENSES)
@@ -133,23 +138,70 @@ async def fuel_consumption(vehicle_id: str, current_user: dict = Depends(get_cur
         .get()
     )
 
-    monthly: dict[str, dict] = {}
-    for e in expenses:
-        data  = e.to_dict()
-        edate = data.get("expense_date")
-        if not edate:
-            continue
-        key = str(edate)[:7]  # "YYYY-MM"
-        if key not in monthly:
-            monthly[key] = {"litres": 0.0, "amount": 0.0}
-        monthly[key]["litres"] += data.get("litres", 0.0)
-        monthly[key]["amount"] += data.get("amount", 0.0)
+    # Odometer segments: each reading measures the distance since the previous
+    # one, and the segment belongs to the month of the later fill. Fills
+    # without an odometer contribute litres and cost but no distance.
+    fills = sorted(
+        (
+            {
+                "date": e.to_dict().get("expense_date"),
+                "litres": float(e.to_dict().get("litres") or 0.0),
+                "amount": float(e.to_dict().get("amount") or 0.0),
+                "odometer": float(e.to_dict().get("odometer_km") or 0.0) or None,
+            }
+            for e in expenses
+        ),
+        key=lambda f: f["date"] or datetime.min.replace(tzinfo=timezone.utc),
+    )
 
-    vehicle_data = doc.to_dict()
+    monthly: dict[str, dict] = {}
+    latest_odometer: float | None = None
+    previous_odometer: float | None = None
+    total_distance = 0.0
+    total_litres_all = 0.0
+
+    def _bucket(month_key: str) -> dict:
+        if month_key not in monthly:
+            monthly[month_key] = {
+                "litres": 0.0, "amount": 0.0, "distance_km": 0.0,
+                "km_per_litre": None, "cost_per_km": None,
+            }
+        return monthly[month_key]
+
+    for fill in fills:
+        edate = fill["date"]
+        key = str(edate)[:7] if edate else "unknown"
+        bucket = _bucket(key)
+        bucket["litres"] += fill["litres"]
+        bucket["amount"] += fill["amount"]
+        total_litres_all += fill["litres"]
+
+        if fill["odometer"]:
+            latest_odometer = fill["odometer"]
+            if previous_odometer is not None and fill["odometer"] > previous_odometer:
+                segment = fill["odometer"] - previous_odometer
+                bucket["distance_km"] += segment
+                total_distance += segment
+            previous_odometer = fill["odometer"]
+
+    for entry in monthly.values():
+        if entry["litres"] > 0 and entry["distance_km"] > 0:
+            entry["km_per_litre"] = round(entry["distance_km"] / entry["litres"], 2)
+            entry["cost_per_km"] = round(entry["amount"] / entry["distance_km"], 2)
+        entry["litres"] = round(entry["litres"], 2)
+        entry["amount"] = round(entry["amount"], 2)
+        entry["distance_km"] = round(entry["distance_km"], 2)
+
     return {
         "vehicle_id": vehicle_id,
         "registration_number": vehicle_data.get("registration_number"),
         "total_fuel_consumed": vehicle_data.get("total_fuel_consumed", 0.0),
+        "odometer_latest": latest_odometer,
+        "total_distance_km": round(total_distance, 2),
+        "overall_km_per_litre": (
+            round(total_distance / total_litres_all, 2)
+            if total_litres_all > 0 and total_distance > 0 else None
+        ),
         "monthly_breakdown": monthly,
     }
 
@@ -195,7 +247,17 @@ async def list_expenses(
 
 @router.post("/expenses", response_model=ExpenseResponse, status_code=status.HTTP_201_CREATED)
 async def log_expense(payload: ExpenseCreate, current_user: dict = Depends(get_current_user)):
-    db         = get_db()
+    db = get_db()
+
+    # Expenses mutate vehicle totals, so the caller must own the vehicle.
+    vehicle_doc = db.collection(Collections.FLEET_VEHICLES).document(payload.vehicle_id).get()
+    if not vehicle_doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    if vehicle_doc.to_dict().get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
     expense_id = str(uuid.uuid4())
     # Firestore's Python SDK serialises datetime but NOT datetime.date — writing
     # a bare date raises and surfaces as a 500. Store midnight UTC instead and
@@ -215,18 +277,49 @@ async def log_expense(payload: ExpenseCreate, current_user: dict = Depends(get_c
     }
     db.collection(Collections.FLEET_EXPENSES).document(expense_id).set(data)
 
-    # Increment vehicle totals — never overwrite
+    # A fuel fill with an odometer reading advances the vehicle odometer so the
+    # consumption analytics always see the latest distance marker.
+    vehicle_updates: dict = {}
     if payload.category.value == "fuel" and payload.litres:
-        db.collection(Collections.FLEET_VEHICLES).document(payload.vehicle_id).update({
-            "total_fuel_consumed": Increment(payload.litres),
-            "total_expense": Increment(payload.amount),
-        })
+        vehicle_updates["total_fuel_consumed"] = Increment(payload.litres)
+        vehicle_updates["total_expense"] = Increment(payload.amount)
     else:
-        db.collection(Collections.FLEET_VEHICLES).document(payload.vehicle_id).update({
-            "total_expense": Increment(payload.amount),
-        })
+        vehicle_updates["total_expense"] = Increment(payload.amount)
+    if payload.odometer_km:
+        current_odo = vehicle_doc.to_dict().get("odometer_km") or 0.0
+        if payload.odometer_km > current_odo:
+            vehicle_updates["odometer_km"] = payload.odometer_km
+    db.collection(Collections.FLEET_VEHICLES).document(payload.vehicle_id).update(vehicle_updates)
 
     return ExpenseResponse(**{**data, "expense_date": expense_day})
+
+
+@router.delete("/expenses/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_expense(expense_id: str, current_user: dict = Depends(get_current_user)):
+    db  = get_db()
+    ref = db.collection(Collections.FLEET_EXPENSES).document(expense_id)
+    doc = ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found")
+
+    data = doc.to_dict()
+    if data.get("user_id") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Roll the vehicle totals back so sums stay consistent after a delete.
+    amount = float(data.get("amount") or 0.0)
+    litres = float(data.get("litres") or 0.0)
+    vehicle_id = data.get("vehicle_id")
+    if vehicle_id:
+        vehicle_ref = db.collection(Collections.FLEET_VEHICLES).document(vehicle_id)
+        updates: dict = {"total_expense": Increment(-amount)}
+        if data.get("category") == "fuel" and litres:
+            updates["total_fuel_consumed"] = Increment(-litres)
+        vehicle_ref.update(updates)
+
+    ref.delete()
 
 
 @router.get("/expenses/summary", response_model=ExpenseSummaryResponse)
@@ -342,6 +435,8 @@ async def get_budget(
             "budget_amount": 0.0,
             "spent_amount": 0.0,
             "remaining": 0.0,
+            "over_budget": False,
+            "percentage": 0.0,
         }
 
     data = docs[0].to_dict()
@@ -360,8 +455,13 @@ async def get_budget(
         ) and hasattr(edate, "month") and edate.month == m and edate.year == y
     )
 
+    budget_amount = float(data.get("budget_amount", 0) or 0)
     data["spent_amount"] = round(spent, 2)
-    data["remaining"]    = round(data.get("budget_amount", 0) - spent, 2)
+    data["remaining"] = round(budget_amount - spent, 2)
+    # Server-authoritative over-budget signal — clients no longer have to
+    # infer it from a negative remaining value.
+    data["over_budget"] = budget_amount > 0 and spent > budget_amount
+    data["percentage"] = round(spent / budget_amount * 100, 1) if budget_amount > 0 else 0.0
     return data
 
 
@@ -390,19 +490,29 @@ async def set_budget(payload: BudgetSet, current_user: dict = Depends(get_curren
 # ── Drivers ───────────────────────────────────────────────────────────────────
 
 @router.get("/drivers")
-async def list_drivers(_: dict = Depends(get_current_user)):
+async def list_drivers(current_user: dict = Depends(get_current_user)):
     db   = get_db()
     docs = db.collection(Collections.FLEET_DRIVERS).get()
-    return [{"id": d.id, **d.to_dict()} for d in docs]
+    items = []
+    for d in docs:
+        data = {"id": d.id, **d.to_dict()}
+        # Drivers created before ownership scoping have no owner_uid; they stay
+        # visible so legacy demo data is not silently hidden.
+        owner = data.get("owner_uid")
+        if current_user["role"] not in ("admin", "super_admin") and owner not in (current_user["uid"], None):
+            continue
+        items.append(data)
+    return items
 
 
 @router.post("/drivers", response_model=DriverResponse, status_code=status.HTTP_201_CREATED)
-async def add_driver(payload: DriverCreate, _: dict = Depends(get_current_user)):
+async def add_driver(payload: DriverCreate, current_user: dict = Depends(get_current_user)):
     db        = get_db()
     driver_id = str(uuid.uuid4())
     data = {
         **payload.model_dump(),
         "id": driver_id,
+        "owner_uid": current_user["uid"],
         "assigned_vehicle_id": None,
         "is_active": True,
         "created_at": datetime.now(timezone.utc),
@@ -411,26 +521,106 @@ async def add_driver(payload: DriverCreate, _: dict = Depends(get_current_user))
     return DriverResponse(**data)
 
 
+@router.put("/drivers/{driver_id}", response_model=DriverResponse)
+async def update_driver(
+    driver_id: str,
+    payload: DriverCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    db  = get_db()
+    ref = db.collection(Collections.FLEET_DRIVERS).document(driver_id)
+    doc = ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Driver not found")
+    if doc.to_dict().get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    ref.update(payload.model_dump(exclude_none=True))
+    return DriverResponse(**{**ref.get().to_dict(), "id": driver_id})
+
+
+@router.patch("/drivers/{driver_id}/status")
+async def set_driver_status(
+    driver_id: str,
+    is_active: bool = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    db  = get_db()
+    ref = db.collection(Collections.FLEET_DRIVERS).document(driver_id)
+    doc = ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Driver not found")
+    if doc.to_dict().get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    ref.update({"is_active": is_active})
+    if not is_active:
+        # An inactive driver cannot stay attached to a vehicle.
+        data = doc.to_dict()
+        assigned = data.get("assigned_vehicle_id")
+        if assigned:
+            db.collection(Collections.FLEET_VEHICLES).document(assigned).update(
+                {"assigned_driver_uid": None}
+            )
+            ref.update({"assigned_vehicle_id": None})
+    return {"message": "Driver status updated"}
+
+
+@router.delete("/drivers/{driver_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_driver(driver_id: str, current_user: dict = Depends(get_current_user)):
+    db  = get_db()
+    ref = db.collection(Collections.FLEET_DRIVERS).document(driver_id)
+    doc = ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Driver not found")
+    if doc.to_dict().get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    assigned = doc.to_dict().get("assigned_vehicle_id")
+    if assigned:
+        db.collection(Collections.FLEET_VEHICLES).document(assigned).update(
+            {"assigned_driver_uid": None}
+        )
+    ref.delete()
+
+
 @router.put("/vehicles/{vehicle_id}/driver")
 async def assign_driver(
     vehicle_id: str,
     payload: DriverAssign,
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     db  = get_db()
     ref = db.collection(Collections.FLEET_VEHICLES).document(vehicle_id)
-    if not ref.get().exists:
+    doc = ref.get()
+    if not doc.exists:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
+    if doc.to_dict().get("owner_uid") != current_user["uid"] and current_user["role"] not in (
+        "admin", "super_admin"
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     ref.update({"assigned_driver_uid": payload.driver_uid})
 
-    driver_docs = (
+    # Drivers are matched by document id — the uid field is the owner's id and
+    # is unrelated to which driver this is.
+    previous = (
         db.collection(Collections.FLEET_DRIVERS)
-        .where("uid", "==", payload.driver_uid)
-        .limit(1)
+        .where("assigned_vehicle_id", "==", vehicle_id)
         .get()
     )
-    if driver_docs:
-        driver_docs[0].reference.update({"assigned_vehicle_id": vehicle_id})
+    for d in previous:
+        if not payload.driver_uid or d.id != payload.driver_uid:
+            d.reference.update({"assigned_vehicle_id": None})
+
+    if payload.driver_uid:
+        driver_doc = db.collection(Collections.FLEET_DRIVERS).document(payload.driver_uid).get()
+        if driver_doc.exists:
+            driver_doc.reference.update({"assigned_vehicle_id": vehicle_id})
 
     return {"message": "Driver assigned to vehicle"}

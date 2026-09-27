@@ -14,6 +14,22 @@ from core.config import settings
 _db: Optional[firestore.Client] = None
 
 
+def _normalise_raw_credentials(raw: str) -> str:
+    """
+    Repair the three paste mistakes that reach production over and over:
+    the whole KEY=VALUE line pasted as the value, wrapping quotes added by
+    hand or by a platform editor, and stray whitespace. Anything still
+    unparseable after this is genuinely wrong input.
+    """
+    value = raw.strip()
+    prefix = "FIREBASE_CREDENTIALS_JSON="
+    if value.startswith(prefix):
+        value = value[len(prefix):].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
+
+
 def _load_credentials() -> credentials.Certificate:
     """
     Resolve Firebase credentials in priority order:
@@ -24,15 +40,24 @@ def _load_credentials() -> credentials.Certificate:
     This keeps secrets out of the repo while still supporting a simple local
     workflow where you drop serviceAccountKey.json in the project root.
     """
-    raw = os.getenv("FIREBASE_CREDENTIALS_JSON", "").strip()
+    raw = _normalise_raw_credentials(os.getenv("FIREBASE_CREDENTIALS_JSON", ""))
     if raw:
         try:
             cert_dict = json.loads(raw)
         except json.JSONDecodeError as exc:
+            # Safe diagnostics only: length and the first character identify
+            # a placeholder paste or a truncated value without leaking the key.
             raise ValueError(
                 "FIREBASE_CREDENTIALS_JSON is set but is not valid JSON. "
-                "Paste the entire service-account key file as one line."
+                f"Received {len(raw)} characters starting with {raw[:1]!r}. "
+                "The value must begin with '{' and end with '}' — paste ONLY "
+                "the one-line JSON, not the variable name and not a placeholder."
             ) from exc
+        if not isinstance(cert_dict, dict):
+            raise ValueError(
+                "FIREBASE_CREDENTIALS_JSON parsed but is not a JSON object — "
+                "check for stray wrapping quotes around the value."
+            )
         return credentials.Certificate(cert_dict)
 
     path = settings.FIREBASE_CREDENTIALS_PATH

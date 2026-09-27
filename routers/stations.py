@@ -37,7 +37,7 @@ def _sort_with_risk(items: list[dict], distance_key: str, enabled: bool) -> None
     original distance ordering is preserved.
     """
     if enabled:
-        items.sort(key=lambda x: (x["fraud_risk"].is_blacklisted, x[distance_key]))
+        items.sort(key=lambda x: (x["fraud_risk"]["is_blacklisted"], x[distance_key]))
     else:
         items.sort(key=lambda x: x[distance_key])
 
@@ -195,7 +195,7 @@ async def list_stations(
         s["fraud_risk"] = (risk_map.get(s["id"]) or FraudRiskStatus.clean()).model_dump(mode="json")
         enriched.append(StationResponse(**s))
     if _reduced_visibility_enabled(db):
-        enriched.sort(key=lambda s: (s.fraud_risk.is_blacklisted, s.name))
+        enriched.sort(key=lambda s: (s.fraud_risk["is_blacklisted"], s.name))
     return enriched
 
 

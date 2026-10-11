@@ -11,6 +11,7 @@ from core.firebase import Collections, get_db
 from core.security import hash_password
 from models.user import EmployeeUpdate, UserCreate
 from services import flagging_service
+from services.test_device_seed import seed_test_device
 
 router = APIRouter()
 
@@ -48,6 +49,17 @@ async def live_nozzle_status(_: dict = Depends(require_admin)):
     db   = get_db()
     docs = db.collection(Collections.NOZZLES).get()
     return [{"id": d.id, **d.to_dict()} for d in docs]
+
+
+@router.post("/seed/test-device")
+async def seed_hardware_test_device(_: dict = Depends(require_admin)):
+    db = get_db()
+    result = seed_test_device(db)
+    invalidate(TAG_NOZZLES, TAG_DASHBOARD, TAG_TRANSACTIONS)
+    return {
+        "message": "Hardware test device seed complete",
+        **result,
+    }
 
 
 @router.get("/employees")

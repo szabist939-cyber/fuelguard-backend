@@ -60,6 +60,7 @@ async def compare_prices(
             "price_per_litre": price_data.get("price_per_litre"),
             "distance_km":    dist,
             "last_updated":   price_data.get("effective_from"),
+            "is_sample":      price_data.get("is_sample", False),
         })
     results.sort(key=lambda x: x["price_per_litre"])
     return results
@@ -100,6 +101,7 @@ async def cheapest_fuel(
                 "price_per_litre": p,
                 "distance_km":    round(dist, 2),
                 "address":        station.get("address"),
+                "is_sample":      price_data.get("is_sample", False),
             }
 
     if not cheapest:

@@ -46,8 +46,14 @@ STATIONS = [
      {"petrol": 270.95, "diesel": 277.60}),
     ("APL-G11",       "Attock G-11 Markaz",        "G-11 Markaz, Service Road",          33.6680, 72.9930, "+925122232277", "24 Hours",
      {"petrol": 269.50, "diesel": 276.20, "cng": 198.00}),
-    ("SHELL-I8",      "Shell I-8 Markaz",          "I-8 Markaz, near Double Road",       33.6700, 73.0760, "+925124862100", "24 Hours",
+    ("SHELL-I8",      "Shell I-8 Islamabad Filling Station", "Plot 49, Markaz Road, I-8", 33.666937, 73.072568, None, "24 Hours",
      {"petrol": 275.30, "diesel": 282.00, "premium": 321.40}),
+    ("PSO-I8", "PSO Marwat Filling Station", "I-8 Markaz", 33.668048, 73.077308, None, None,
+     {"petrol": 274.50, "diesel": 281.50}),
+    ("ATTOCK-H8", "Attock Quality Filling Station", "Plot 1, Faiz Ahmad Faiz Road, H-8/2", 33.68067879, 73.06060553, None, None,
+     {"petrol": 273.80, "diesel": 280.90}),
+    ("TOTAL-F8", "Total Parco F-8 Markaz", "F-8 Markaz, near Kachari", 33.7131912, 73.0401127, None, None,
+     {"petrol": 275.00, "diesel": 281.80}),
     ("PSO-E11",       "PSO E-11 Markaz",           "E-11/2 Main Boulevard",              33.7000, 72.9700, "+925122228833", "24 Hours",
      {"petrol": 273.10, "diesel": 280.05, "premium": 315.00}),
     ("GO-F11",        "GO F-11 Markaz",            "F-11 Markaz, Service Road",          33.6870, 72.9980, "+925122100209", "06:00 - 00:00",
@@ -74,6 +80,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="Overwrite existing docs")
     ap.add_argument("--dry-run", action="store_true", help="Print planned writes only")
     ap.add_argument("--purge-city", help="Delete all stations in this city (and their prices), then exit")
+    ap.add_argument("--station-id", action="append", help="Seed only this station ID; repeat for several stations")
     args = ap.parse_args()
 
     with open(args.key, encoding="utf-8") as fh:
@@ -85,10 +92,14 @@ def main() -> int:
         return 1
     print(f"Project: {actual}")
 
+    selected = [s for s in STATIONS if not args.station_id or s[0] in args.station_id]
+    if args.station_id and set(args.station_id) - {s[0] for s in selected}:
+        ap.error('Unknown --station-id')
+
     if args.dry_run:
-        total_prices = sum(len(s[7]) for s in STATIONS)
-        print(f"DRY RUN — would write {len(STATIONS)} stations and {total_prices} price docs.")
-        for sid, name, addr, lat, lng, _p, _h, prices in STATIONS:
+        total_prices = sum(len(s[7]) for s in selected)
+        print(f"DRY RUN — would write {len(selected)} stations and {total_prices} price docs.")
+        for sid, name, addr, lat, lng, _p, _h, prices in selected:
             listed = ", ".join(f"{k} {v:.2f}" for k, v in prices.items())
             print(f"  {sid:<14} {name:<28} ({lat},{lng})  {listed}")
         return 0
@@ -114,7 +125,14 @@ def main() -> int:
 
     created_s = skipped_s = created_p = skipped_p = 0
 
-    for sid, name, addr, lat, lng, phone, hours, prices in STATIONS:
+    sources = {
+        'SHELL-I8': 'https://find.shell.com/pk/fuel/10126336-i-8-islamabad-filling-station/en_US',
+        'PSO-I8': 'https://psopk.com/en/ev-stations-locator',
+        'ATTOCK-H8': 'https://ogra.org.pk/download/12639',
+        'TOTAL-F8': 'https://pk.near-place.com/total-parco-petrol-station-islamabad',
+    }
+    print('All seeded prices are SAMPLE data, not verified current pump prices.')
+    for sid, name, addr, lat, lng, phone, hours, prices in selected:
         sref = db.collection("stations").document(sid)
         if sref.get().exists and not args.force:
             skipped_s += 1
@@ -131,6 +149,7 @@ def main() -> int:
                 "operating_hours": hours,
                 "is_active": True,
                 "seeded": True,
+                "source_url": sources.get(sid),
                 "created_at": now,
             })
             created_s += 1
@@ -147,10 +166,19 @@ def main() -> int:
                 "fuel_type": fuel,
                 "price_per_litre": price,
                 "updated_by": "seed",
+                "is_sample": True,
                 "effective_from": now,
                 "created_at": now,
             })
             created_p += 1
+            history_id = f"seed_{pid}"
+            history_ref = db.collection('price_history').document(history_id)
+            if not history_ref.get().exists:
+                history_ref.set({
+                    'id': history_id, 'station_id': sid, 'fuel_type': fuel,
+                    'price_per_litre': price, 'updated_by': 'sample_seed',
+                    'is_sample': True, 'effective_from': now, 'created_at': now,
+                })
 
     print(f"Stations: {created_s} written, {skipped_s} skipped")
     print(f"Prices:   {created_p} written, {skipped_p} skipped")
